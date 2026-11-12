@@ -23,35 +23,48 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import io.wpreborn.app.data.CountryState
 import io.wpreborn.app.data.WorldContent
+import io.wpreborn.app.data.WorldRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import android.util.LruCache
 
 private val flagCache = object : LruCache<String, Bitmap>(48) {}
 
+private val customFlagCache = object : LruCache<Long, ByteArray>(8 shl 20) {
+    override fun sizeOf(key: Long, value: ByteArray): Int = value.size
+}
+
+private fun customFlagBytes(coId: Long): ByteArray? {
+    customFlagCache.get(coId)?.let { return it }
+    val bytes = WorldRepository.shared?.countryFlagBytes(coId) ?: return null
+    customFlagCache.put(coId, bytes)
+    return bytes
+}
+
 private suspend fun loadFlag(context: android.content.Context, country: CountryState): Bitmap? {
-    val key = country.coId.toString() + ":" + country.flagName + ":" + (country.flagBytes?.size ?: 0)
+    val key = country.coId.toString() + ":" + country.flagName + ":" + country.hasCustomFlag
     flagCache.get(key)?.let { return it }
     val bmp = withContext(Dispatchers.IO) {
         try {
-            if (country.flagBytes != null) {
-                val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-                BitmapFactory.decodeByteArray(country.flagBytes, 0, country.flagBytes.size, opts)
+            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+            val bytes = if (country.hasCustomFlag) customFlagBytes(country.coId) else null
+            if (bytes != null) {
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
             } else if (country.flagName.isNotBlank()) {
                 context.assets.open("content/flags/${country.flagName}.png").use { input ->
-                    val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
                     BitmapFactory.decodeStream(input, null, opts)
                 }
             } else {
                 val info = WorldContent.countryByCode[country.code]
                 if (info != null && info.flag.isNotBlank()) {
                     context.assets.open("content/flags/${info.flag}.png").use { input ->
-                        val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
                         BitmapFactory.decodeStream(input, null, opts)
                     }
                 } else null
             }
         } catch (_: Exception) {
+            null
+        } catch (_: OutOfMemoryError) {
             null
         }
     }

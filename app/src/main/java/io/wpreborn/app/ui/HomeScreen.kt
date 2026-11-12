@@ -66,7 +66,6 @@ import java.util.Locale
 
 @Composable
 fun HomeScreen(vm: WorldViewModel) {
-    var thumbs by remember { mutableStateOf<Map<Long, Bitmap>>(emptyMap()) }
     var showNewDialog by remember { mutableStateOf(false) }
     var renameTarget by remember { mutableStateOf<MapSummary?>(null) }
     var deleteTarget by remember { mutableStateOf<MapSummary?>(null) }
@@ -77,11 +76,6 @@ fun HomeScreen(vm: WorldViewModel) {
 
     LaunchedEffect(vm.maps) {
         hasBackup = withContext(Dispatchers.IO) { vm.repo.lastBackup() != null }
-        val out = HashMap<Long, Bitmap>()
-        for (m in vm.maps) {
-            vm.loadThumbnail(m.id, 420, 280)?.let { out[m.id] = it }
-        }
-        thumbs = out
     }
 
     val importLauncher = rememberLauncherForActivityResult(
@@ -134,6 +128,42 @@ fun HomeScreen(vm: WorldViewModel) {
                     color = Muted,
                 )
                 Spacer(Modifier.height(22.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Button(
+                        onClick = { showNewDialog = true },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(50.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Periwinkle,
+                            contentColor = Color(0xFF08122E),
+                        ),
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("New world", fontWeight = FontWeight.SemiBold)
+                    }
+                    OutlinedButton(
+                        onClick = { showImportInfo = true },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(50.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                            horizontal = 10.dp,
+                        ),
+                    ) {
+                        Text("Import", fontWeight = FontWeight.Medium)
+                    }
+                }
+                if (hasBackup) {
+                    TextButton(
+                        onClick = { showRestore = true },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                    ) { Text("Restore data from the last import") }
+                }
+                Spacer(Modifier.height(18.dp))
             }
         }
 
@@ -145,7 +175,7 @@ fun HomeScreen(vm: WorldViewModel) {
             items(vm.maps, key = { it.id }) { map ->
                 MapCard(
                     map = map,
-                    thumbnail = thumbs[map.id],
+                    thumbnail = rememberMapThumbnail(vm, map),
                     onOpen = { vm.openMap(map.id) },
                     onRename = { renameTarget = map },
                     onDelete = { deleteTarget = map },
@@ -158,36 +188,7 @@ fun HomeScreen(vm: WorldViewModel) {
         }
 
         item {
-            Spacer(Modifier.height(6.dp))
-            Button(
-                onClick = { showNewDialog = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Periwinkle, contentColor = Color(0xFF08122E)),
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("New world", fontWeight = FontWeight.SemiBold)
-            }
-            Spacer(Modifier.height(10.dp))
-            OutlinedButton(
-                onClick = { showImportInfo = true },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-                shape = RoundedCornerShape(16.dp),
-            ) {
-                Text("Import database from the original app")
-            }
-            if (hasBackup) {
-                TextButton(
-                    onClick = { showRestore = true },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("Restore data from the last import") }
-            }
-            Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(14.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AssistChip(onClick = {}, label = { Text("No ads", fontSize = 12.sp) })
                 AssistChip(onClick = {}, label = { Text("Offline", fontSize = 12.sp) })
@@ -297,6 +298,24 @@ fun HomeScreen(vm: WorldViewModel) {
             dismissButton = { TextButton(onClick = { pendingImport = null }) { Text("Cancel") } },
         )
     }
+}
+
+/** Renders at most the thumbnails that are actually on screen. */
+private val thumbnailCache = object : android.util.LruCache<String, Bitmap>(24) {}
+
+@Composable
+private fun rememberMapThumbnail(vm: WorldViewModel, map: MapSummary): Bitmap? {
+    val key = "${map.id}:${map.dti}"
+    val state = androidx.compose.runtime.produceState<Bitmap?>(
+        initialValue = thumbnailCache.get(key),
+        key1 = key,
+    ) {
+        if (value != null) return@produceState
+        val bitmap = withContext(Dispatchers.IO) { vm.loadThumbnail(map.id, 420, 280) }
+        if (bitmap != null) thumbnailCache.put(key, bitmap)
+        value = bitmap
+    }
+    return state.value
 }
 
 @Composable

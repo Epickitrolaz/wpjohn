@@ -131,8 +131,8 @@ fun MapScreen(vm: WorldViewModel) {
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        "${runtime.countries.count { it.provinceCount > 0 }} countries · " +
-                            "${runtime.owners.count { it != 0L }} provinces",
+                        "${runtime.countries.count { it.provinceCount > 0 && it.isLandCountry }} countries · " +
+                            "${runtime.landOwned} provinces",
                         style = MaterialTheme.typography.labelMedium,
                         color = Muted,
                     )
@@ -283,6 +283,10 @@ fun MapScreen(vm: WorldViewModel) {
                     vm.selectCountry(it)
                     showCountries = false
                 },
+                onInspect = {
+                    vm.selectCountry(null)
+                    showCountries = false
+                },
                 onEdit = { editCountry = it },
                 onNew = { showNewCountry = true },
             )
@@ -419,18 +423,23 @@ private fun PaintPanel(
         color = Color(0xF5121A2D),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(top = 14.dp, bottom = 12.dp)) {
-            Row(
-                modifier = Modifier.padding(horizontal = 18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "PAINT WITH",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = Muted,
-                        letterSpacing = 1.6.sp,
-                    )
+        Row(
+            modifier = Modifier.padding(start = 18.dp, end = 12.dp, top = 12.dp, bottom = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "PAINTING AS",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Muted,
+                    letterSpacing = 1.6.sp,
+                )
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (selected != null) {
+                        CountryFlag(selected, size = 22.dp)
+                        Spacer(Modifier.width(8.dp))
+                    }
                     Text(
                         selected?.name ?: "Inspect mode",
                         style = MaterialTheme.typography.titleMedium,
@@ -439,98 +448,15 @@ private fun PaintPanel(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
-                OutlinedButton(
-                    onClick = onCountries,
-                    shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                ) { Text("Countries", fontSize = 13.sp) }
             }
-            Spacer(Modifier.height(10.dp))
-            val visible = runtime.countries
-                .filter { it.provinceCount > 0 || it.isCustom }
-                .sortedWith(
-                    compareBy(
-                        { !it.isCustom },
-                        { it.provinceCount == 0 },
-                        { it.name.lowercase(Locale.ROOT) },
-                    )
-                )
-            val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-            val selectedIndex = visible.indexOfFirst { it.mcId == selectedMc }
-            androidx.compose.runtime.LaunchedEffect(selectedMc) {
-                if (selectedIndex >= 0) listState.animateScrollToItem(selectedIndex)
+            if (selected != null) {
+                TextButton(onClick = { onSelect(selected.mcId) }) { Text("Clear") }
             }
-            LazyRow(
-                state = listState,
-                contentPadding = PaddingValues(horizontal = 14.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                item {
-                    InspectChip(selected = selectedMc == null) {
-                        if (selectedMc != null) onSelect(selectedMc)
-                    }
-                }
-                items(visible, key = { it.mcId }) { country ->
-                    CountryChip(
-                        country = country,
-                        selected = country.mcId == selectedMc,
-                        onClick = { onSelect(country.mcId) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CountryChip(country: CountryState, selected: Boolean, onClick: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = if (selected) Color(0xFF243354) else Color(0xFF1A2338),
-        border = androidx.compose.foundation.BorderStroke(
-            if (selected) 1.5.dp else 1.dp,
-            if (selected) Periwinkle else Color(0x14FFFFFF),
-        ),
-        modifier = Modifier.clickable(onClick = onClick),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CountryFlag(country, size = 24.dp)
-            Spacer(Modifier.width(7.dp))
-            Text(
-                country.name,
-                color = if (selected) Mist else Color(0xFFC3CBDE),
-                style = MaterialTheme.typography.labelLarge,
-                maxLines = 1,
-                modifier = Modifier.width(104.dp),
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(Modifier.width(6.dp))
-            ColorDot(country.color, size = 10.dp)
-        }
-    }
-}
-
-@Composable
-private fun InspectChip(selected: Boolean, onClick: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = if (selected) Color(0xFF243354) else Color(0xFF1A2338),
-        border = androidx.compose.foundation.BorderStroke(
-            if (selected) 1.5.dp else 1.dp,
-            if (selected) Periwinkle else Color(0x14FFFFFF),
-        ),
-        modifier = Modifier.clickable(onClick = onClick),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("◎", color = if (selected) Mist else Muted, fontSize = 14.sp)
-            Spacer(Modifier.width(6.dp))
-            Text("Inspect", color = if (selected) Mist else Color(0xFFC3CBDE), style = MaterialTheme.typography.labelLarge)
+            OutlinedButton(
+                onClick = onCountries,
+                shape = RoundedCornerShape(12.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+            ) { Text("Countries", fontSize = 13.sp) }
         }
     }
 }
@@ -539,12 +465,13 @@ private fun InspectChip(selected: Boolean, onClick: () -> Unit) {
 private fun CountriesSheet(
     runtime: MapRuntime,
     onPick: (Long) -> Unit,
+    onInspect: () -> Unit,
     onEdit: (CountryState) -> Unit,
     onNew: () -> Unit,
 ) {
-    val ordered = runtime.countries.sortedWith(
-        compareBy({ it.provinceCount == 0 }, { it.name.lowercase(Locale.ROOT) })
-    )
+    val ordered = runtime.countries
+        .filter { it.isLandCountry }
+        .sortedWith(compareBy({ it.provinceCount == 0 }, { it.name.lowercase(Locale.ROOT) }))
     Column(Modifier.fillMaxWidth().height(520.dp)) {
         Row(
             modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
@@ -570,6 +497,29 @@ private fun CountriesSheet(
         }
         Spacer(Modifier.height(8.dp))
         LazyColumn(contentPadding = PaddingValues(bottom = 24.dp)) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onInspect() }
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier.size(34.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("◎", color = Muted, fontSize = 20.sp) }
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Inspect mode", color = Mist, style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Look around without painting",
+                            color = Muted,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
+            }
             items(ordered, key = { it.mcId }) { country ->
                 Row(
                     modifier = Modifier

@@ -51,6 +51,13 @@ The imported file is used as-is: this app reads and writes the same SQLite
 schema (`co`, `pr`, `ma`, `mc`, `pc`, `hi`, `cf`, `re`), version 13. Exporting
 produces a file the original app can read back.
 
+Large exports are streamed straight into the app's database folder (never the
+cache), with progress shown while copying, so a 500 MB original imports without
+needing twice the free space. Only real saved worlds are listed: the original
+app also stores internal `map_tech<timestamp>` scratch maps with `ma_status = 1`,
+which are hidden exactly as the original hides them. Old copies are kept for
+three imports, but automatic backups are skipped for databases over 256 MB.
+
 ## Building
 
 Requirements: JDK 17, Android SDK with platform 35 and build-tools 35.0.0.
@@ -115,12 +122,17 @@ database, so a fresh install opens instantly instead of inserting 10,000 rows.
 - The visible world is rendered on a background thread into a reused bitmap.
   Panning and pinching only transform the last rendered bitmap, so no geometry
   is redrawn during a gesture.
-- Only idle viewports are re-rendered; the renderer is debounced and skips
-  frames while fingers are down.
+- While a finger is down the viewport is still refreshed, at a relaxed rate and
+  without borders or anti-aliasing, so newly revealed areas appear during the
+  drag instead of only on release. A sharp frame always follows when the gesture
+  ends.
 - Country borders are drawn as one combined path instead of one stroke per
   province.
 - Tap hit-testing uses bounding boxes first and polygon tests only for the few
   candidates under the finger.
+- Home thumbnails render only for visible cards, and custom flag images are read
+  from the database on demand; an imported world with 1,000+ custom flags never
+  loads them all at once.
 - Measured on the test emulator (software GPU): ~65 ms per full-world render,
   ~62 MB total PSS.
 

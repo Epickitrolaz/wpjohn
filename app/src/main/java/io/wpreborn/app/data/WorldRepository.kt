@@ -23,11 +23,14 @@ data class CountryState(
     val name: String,
     val color: Int,
     val flagName: String,
-    val flagBytes: ByteArray?,
+    /** True when the database stores a custom flag image; bytes are loaded on demand. */
+    val hasCustomFlag: Boolean,
     val capitalProvince: String,
     val capitalName: String,
     val continent: Int,
     val isCustom: Boolean,
+    /** False for the ocean/sea pseudo-countries, which can never be painted. */
+    val isLandCountry: Boolean,
     val provinceCount: Int,
 )
 
@@ -41,6 +44,8 @@ class MapRuntime(
     val prNames: Array<String?>,
     val prCoIds: LongArray,
     val colors: IntArray,
+    /** Land provinces that currently have an owner, for the header counter. */
+    val landOwned: Int,
 ) {
     fun countryOfProvince(index: Int): CountryState? = countryByMc[owners.getOrElse(index) { 0L }]
     fun nameOfProvince(index: Int): String {
@@ -61,6 +66,10 @@ sealed class DbResult {
 }
 
 class WorldRepository(private val context: Context) {
+
+    init {
+        shared = this
+    }
 
     private var helper: WorldDb? = null
 
@@ -106,8 +115,10 @@ class WorldRepository(private val context: Context) {
     fun listMaps(): List<MapSummary> {
         val out = ArrayList<MapSummary>()
         db().rawQuery(
+            // ma_status 1 is the original app's scratch map ("map_tech…"), cleaned
+            // up by the game itself. Only status 0 maps are real saved worlds.
             "select _id, ma_name, ma_type, ma_dti, ma_identyf, ma_mode, ma_round, ma_status " +
-                "from ma order by ma_dti desc, _id desc", null,
+                "from ma where ma_status = 0 order by ma_dti desc, _id desc", null,
         ).use { c ->
             while (c.moveToNext()) {
                 out += MapSummary(
@@ -184,8 +195,18 @@ class WorldRepository(private val context: Context) {
     // --------------------------------------------------------------- runtime
 
     fun loadRuntime(mapId: Long): MapRuntime? {
-        val map = listMaps().firstOrNull { it.id == mapId } ?: return null
         val db = db()
+        val map = db.rawQuery(
+            "select _id, ma_name, ma_type, ma_dti, ma_identyf, ma_mode, ma_round, ma_status " +
+                "from ma where _id = ?",
+            arrayOf(mapId.toString()),
+        ).use { c ->
+            if (!c.moveToFirst()) return null
+            MapSummary(
+                id = c.getLong(0), name = c.getStringOr(1), type = c.getIntOr(2),
+                dti = c.getLongOr(3), round = c.getIntOr(6), status = c.getIntOr(7),
+            )
+        }
         val content = WorldContent.provinces
         val provinces = content
         val n = provinces.size
@@ -220,8 +241,9 @@ class WorldRepository(private val context: Context) {
         val countries = ArrayList<CountryState>(280)
         db.rawQuery(
             "select mc._id, co._id, co.co_code, co.co_custom_name, co.co_custom_color, " +
-                "co.co_res_draw_flag_name, co.co_flag_file, co.co_capital, co.co_name_capital, " +
-                "co.co_continent, co.ma_id from mc join co on co._id = mc.co_id where mc.ma_id = ?",
+                "co.co_res_draw_flag_name, case when co.co_flag_file is null then 0 else 1 end, " +
+                "co.co_capital, co.co_name_capital, co.co_continent, co.ma_id " +
+                "from mc join co on co._id = mc.co_id where mc.ma_id = ?",
             arrayOf(mapId.toString()),
         ).use { c ->
             while (c.moveToNext()) {
@@ -236,7 +258,6 @@ class WorldRepository(private val context: Context) {
                 val colorValue = c.getStringOr(4)
                 val color = Colors.parse(colorValue, builtin?.baseColor ?: DEFAULT_NEUTRAL)
                 val flagName = c.getStringOr(5).ifBlank { builtin?.flag ?: "" }
-                val flagBytes = if (c.isNull(6)) null else c.getBlob(6)
                 countries += CountryState(
                     mcId = c.getLong(0),
                     coId = c.getLong(1),
@@ -244,11 +265,12 @@ class WorldRepository(private val context: Context) {
                     name = name,
                     color = color,
                     flagName = flagName,
-                    flagBytes = flagBytes,
+                    hasCustomFlag = c.getLongOr(6) > 0,
                     capitalProvince = c.getStringOr(7),
                     capitalName = c.getStringOr(8),
                     continent = c.getIntOr(9),
                     isCustom = c.getLongOr(10) > 0,
+                    isLandCountry = builtin == null || builtin.mode == 3 || builtin.mode == 4,
                     provinceCount = 0,
                 )
             }
@@ -281,15 +303,92 @@ class WorldRepository(private val context: Context) {
             }
         }
 
+        var landOwned = 0
+        for (i in 0 until n) {
+            if (provinces[i].isLand && owners[i] != 0L) landOwned++
+        }
+
         return MapRuntime(
             map, withCounts, countryByMc,
             withCounts.associateBy { it.coId },
-            owners, prIds, prNames, prCoIds, colors,
+            owners, prIds, prNames, prCoIds, colors, landOwned,
         )
     }
 
-    fun thumbnail(runtime: MapRuntime, width: Int, height: Int): Bitmap =
-        Thumbnail.render(runtime.colors, width, height, OCEAN)
+    /**
+     * Colour-only view of a world, used for thumbnails. Deliberately avoids
+     * building country objects or touching flag blobs: an imported original can
+     * hold 1,000+ countries with megabyte-sized custom flags.
+     */
+    fun loadColors(mapId: Long): IntArray? {
+        val db = db()
+        val exists = db.rawQuery("select 1 from ma where _id = ?", arrayOf(mapId.toString()))
+            .use { it.moveToFirst() }
+        if (!exists) return null
+
+        val colorByCo = HashMap<Long, Int>(2048)
+        db.rawQuery("select _id, co_code, co_custom_color from co", null).use { c ->
+            while (c.moveToNext()) {
+                val builtin = WorldContent.countryByCode[c.getStringOr(1)]
+                colorByCo[c.getLong(0)] = Colors.parse(c.getStringOr(2), builtin?.baseColor ?: DEFAULT_NEUTRAL)
+            }
+        }
+        val colorByMc = HashMap<Long, Int>(2048)
+        db.rawQuery("select _id, co_id from mc where ma_id = ?", arrayOf(mapId.toString())).use { c ->
+            while (c.moveToNext()) colorByMc[c.getLong(0)] = colorByCo[c.getLong(1)] ?: DEFAULT_NEUTRAL
+        }
+
+        val provinces = WorldContent.provinces
+        val n = provinces.size
+        val prCoIds = LongArray(n)
+        val indexByPrId = HashMap<Long, Int>(n * 2)
+        db.rawQuery("select _id, pr_code, co_id from pr", null).use { c ->
+            while (c.moveToNext()) {
+                val idx = WorldContent.provinceIndexByCode[c.getStringOr(1)] ?: continue
+                indexByPrId[c.getLong(0)] = idx
+                prCoIds[idx] = c.getLong(2)
+            }
+        }
+        val owners = LongArray(n)
+        db.rawQuery(
+            "select pc.pr_id, pc.mc_id from pc join mc on mc._id = pc.mc_id where mc.ma_id = ?",
+            arrayOf(mapId.toString()),
+        ).use { c ->
+            while (c.moveToNext()) {
+                val idx = indexByPrId[c.getLong(0)] ?: continue
+                owners[idx] = c.getLong(1)
+            }
+        }
+
+        val colors = IntArray(n)
+        for (i in 0 until n) {
+            val p = provinces[i]
+            val owned = colorByMc[owners[i]]
+            val base = colorByCo[prCoIds[i]]
+                ?: WorldContent.countryByCode[p.countryCode]?.baseColor
+            colors[i] = when {
+                p.mode == 1 || p.mode == 6 -> OCEAN
+                p.mode == 2 -> blend(owned ?: base ?: DEFAULT_SEA, OCEAN, 0.30f)
+                p.isLand -> owned ?: base ?: DEFAULT_NEUTRAL
+                else -> base ?: DEFAULT_NEUTRAL
+            }
+        }
+        return colors
+    }
+
+    fun thumbnail(mapId: Long, width: Int, height: Int): Bitmap? {
+        val colors = loadColors(mapId) ?: return null
+        return Thumbnail.render(colors, width, height, OCEAN)
+    }
+
+    /** Custom flag image, fetched only when a country is actually shown. */
+    fun countryFlagBytes(coId: Long): ByteArray? = try {
+        db().rawQuery("select co_flag_file from co where _id = ?", arrayOf(coId.toString())).use { c ->
+            if (c.moveToFirst() && !c.isNull(0)) c.getBlob(0) else null
+        }
+    } catch (_: Exception) {
+        null
+    }
 
     // --------------------------------------------------------------- painting
 
@@ -475,30 +574,60 @@ class WorldRepository(private val context: Context) {
         }
     }
 
-    fun importFrom(uri: Uri): DbResult {
-        val tmp = File(context.cacheDir, "import_probe.db")
+    fun importFrom(uri: Uri, onProgress: ((Long) -> Unit)? = null): DbResult {
+        val dir = dbFile.parentFile ?: return DbResult.Failure("App storage is unavailable")
+        dir.mkdirs()
+        // Stream straight into the app's database folder: the cache partition can
+        // be tiny, and real originals easily exceed 500 MB.
+        val tmp = File(dir, "import_probe.db")
+        val sidecars = listOf("-wal", "-shm", "-journal", "-mj").map { File(tmp.path + it) }
         return try {
-            context.contentResolver.openInputStream(uri)?.use { input ->
-                tmp.outputStream().use { input.copyTo(it, 1 shl 16) }
-            } ?: return DbResult.Failure("Could not read the selected file")
+            val input = context.contentResolver.openInputStream(uri)
+                ?: return DbResult.Failure("Could not read the selected file")
+            var copied = 0L
+            var lastReport = 0L
+            input.use { source ->
+                tmp.outputStream().use { sink ->
+                    val buffer = ByteArray(1 shl 16)
+                    while (true) {
+                        val read = source.read(buffer)
+                        if (read < 0) break
+                        sink.write(buffer, 0, read)
+                        copied += read
+                        if (copied - lastReport >= (8L shl 20)) {
+                            lastReport = copied
+                            onProgress?.invoke(copied)
+                        }
+                    }
+                    sink.flush()
+                    runCatching { sink.fd.sync() }
+                }
+            }
+            onProgress?.invoke(copied)
+            if (copied < 1024) return DbResult.Failure("That file is empty")
 
             val validation = validateDatabase(tmp)
             if (validation != null) return DbResult.Failure(validation)
 
             close()
             backupCurrent()
-            val wal = File(dbFile.path + "-wal")
-            val shm = File(dbFile.path + "-shm")
-            val journal = File(dbFile.path + "-journal")
-            wal.delete(); shm.delete(); journal.delete()
-            dbFile.parentFile?.mkdirs()
-            tmp.copyTo(dbFile, overwrite = true)
-            tmp.delete()
+            val target = dbFile
+            listOf("-wal", "-shm", "-journal").forEach { File(target.path + it).delete() }
 
-            // touch the database so a broken file fails here rather than mid-session
-            val test = SQLiteDatabase.openDatabase(dbFile.path, null, SQLiteDatabase.OPEN_READONLY)
-            test.rawQuery("select count(*) from co", null).use { it.moveToFirst() }
-            test.close()
+            // Same directory, so the move is a rename and never needs a second copy.
+            if (!tmp.renameTo(target)) {
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
+            sidecars.forEach { it.delete() }
+
+            // Open it once so a damaged file fails here rather than mid-session.
+            val test = SQLiteDatabase.openDatabase(target.path, null, SQLiteDatabase.OPEN_READONLY)
+            try {
+                test.rawQuery("select count(*) from ma", null).use { it.moveToFirst() }
+            } finally {
+                test.close()
+            }
             DbResult.Ok("Database imported")
         } catch (e: Exception) {
             DbResult.Failure(e.message ?: "Import failed")
@@ -536,13 +665,19 @@ class WorldRepository(private val context: Context) {
 
     private fun backupCurrent() {
         if (!dbFile.exists()) return
+        // Keep the safety net, but never let a huge imported database turn into
+        // several gigabytes of copies.
+        if (dbFile.length() > MAX_BACKUP_BYTES) {
+            File(context.filesDir, "database_backups").listFiles()?.forEach { it.delete() }
+            return
+        }
         val dir = File(context.filesDir, "database_backups")
         dir.mkdirs()
         val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
             .format(java.util.Date())
         dbFile.copyTo(File(dir, "worldprovinces-$stamp.db"), overwrite = true)
         val backups = dir.listFiles()?.sortedByDescending { it.lastModified() } ?: return
-        backups.drop(5).forEach { it.delete() }
+        backups.drop(3).forEach { it.delete() }
     }
 
     fun lastBackup(): File? = File(context.filesDir, "database_backups")
@@ -554,7 +689,14 @@ class WorldRepository(private val context: Context) {
             close()
             File(dbFile.path + "-wal").delete()
             File(dbFile.path + "-shm").delete()
-            backup.copyTo(dbFile, overwrite = true)
+            File(dbFile.path + "-journal").delete()
+            val tmp = File(dbFile.parentFile, "restore_probe.db")
+            backup.copyTo(tmp, overwrite = true)
+            listOf("-wal", "-shm", "-journal").forEach { File(dbFile.path + it).delete() }
+            if (!tmp.renameTo(dbFile)) {
+                tmp.copyTo(dbFile, overwrite = true)
+                tmp.delete()
+            }
             db()
             DbResult.Ok("Previous data restored")
         } catch (e: Exception) {
@@ -564,9 +706,17 @@ class WorldRepository(private val context: Context) {
 
     companion object {
         const val NAME_MARKER = "<@$%*%$@>"
+
+        /** The active repository, for lazy lookups such as flag blobs. */
+        @Volatile
+        var shared: WorldRepository? = null
+            private set
         const val OCEAN = 0xFF0B1526.toInt()
         const val DEFAULT_NEUTRAL = 0xFF515A6E.toInt()
         const val DEFAULT_SEA = 0xFF16305A.toInt()
+
+        /** Originals can be ~500 MB; above this we stop keeping automatic copies. */
+        private const val MAX_BACKUP_BYTES = 256L shl 20
 
         fun blend(a: Int, b: Int, t: Float): Int {
             val r = (android.graphics.Color.red(a) * (1 - t) + android.graphics.Color.red(b) * t).toInt()

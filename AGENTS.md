@@ -136,14 +136,40 @@ The current numbers (software-GPU emulator): ~65 ms full-world render, ~62 MB PS
   per frame.
 - Rendering happens on the single `map-renderer` thread into a reused bitmap.
   `onDraw` only blits the last bitmap; during gestures it must not draw geometry.
-- `scheduleRender()` is debounced (~60 ms) and skipped while `gesturing` is true.
-  Keep the `renderInFlight` / `pendingRender` handshake so frames cannot pile up.
+- `scheduleRender()` is debounced and never blocked by a gesture: while
+  `gesturing` it renders coarse frames (no anti-aliasing, borders or grid) on a
+  ~55 ms throttle, then a full-quality frame when the gesture ends. Keep the
+  `renderInFlight` / `pendingRender` / `forceFullQuality` handshake so frames
+  cannot pile up and the last frame is always sharp.
 - Draw order is ocean → ocean extras → seas → land (`Geo.drawOrder`). Borders are
   one combined land-only path, not one stroke per province.
 - Hit testing rejects by bounding box before any polygon test, and only land
   provinces are considered.
-- Thumbnails reuse the same geometry at low resolution; they are rendered off the
-  main thread in `WorldViewModel.loadThumbnail`.
+- Thumbnails reuse the same geometry at low resolution, are rendered off the main
+  thread, and are requested per visible card (never in a loop over every world).
+  `WorldRepository.loadColors` is the lightweight path they use: two queries and
+  a colour array, no country objects.
+- Never select `co_flag_file` in list queries. Imported databases can hold
+  hundreds of custom flag blobs; `CountryFlag` fetches one blob on demand via
+  `WorldRepository.countryFlagBytes`.
+
+## Gesture handling
+
+`MapView` tracks one `activePointerId`. On `ACTION_POINTER_UP` it must rebase
+`lastX/lastY/downX/downY` to the surviving pointer and forbid panning until the
+next `ACTION_DOWN`; otherwise the next move compares against the finger that
+left and the map teleports. Two-finger pan comes from the scale detector's
+focus delta, and `scaleFactor` is clamped to `0.5..2` per event as a guard.
+
+## Imported databases
+
+- Only `ma_status = 0` worlds are real; `ma_status = 1` rows are the original
+  app's `map_tech<timestamp>` scratch maps and must stay hidden from the list.
+- Import streams into `databases/import_probe.db`, validates, backs up (skipped
+  above 256 MB), then renames over the live database. Never copy the file into
+  the cache directory: originals reach ~500 MB.
+- A world can hold 1,600+ countries, 1.4 million `mc` rows and 6.6 million `pc`
+  rows. Anything that iterates worlds must stay lazy.
 
 ## UI conventions
 

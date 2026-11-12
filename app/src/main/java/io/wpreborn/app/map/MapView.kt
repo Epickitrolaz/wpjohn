@@ -68,6 +68,7 @@ class MapView @JvmOverloads constructor(
     private var renderScheduled = false
     private var renderInFlight = false
     private var pendingRender = false
+    private var forceFullQuality = false
     private var gesturing = false
 
     private val handler = Handler(Looper.getMainLooper())
@@ -78,6 +79,7 @@ class MapView @JvmOverloads constructor(
     private var borderPath: Path? = null
     private val borderLock = Any()
 
+    private var activePointerId = MotionEvent.INVALID_POINTER_ID
     private var lastX = 0f
     private var lastY = 0f
     private var downX = 0f
@@ -86,17 +88,35 @@ class MapView @JvmOverloads constructor(
     private val touchSlop = 8f * resources.displayMetrics.density
 
     private val scaleDetector = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        private var lastFocusX = 0f
+        private var lastFocusY = 0f
+
         override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
             panning = false
+            lastFocusX = detector.focusX
+            lastFocusY = detector.focusY
             return true
         }
 
         override fun onScale(detector: ScaleGestureDetector): Boolean {
-            val old = scale
-            val next = (scale * detector.scaleFactor).coerceIn(minScale, maxScale)
-            if (next == old) return true
             val fx = detector.focusX
             val fy = detector.focusY
+            // Two fingers moving together should also drag the map.
+            tx += fx - lastFocusX
+            ty += fy - lastFocusY
+            lastFocusX = fx
+            lastFocusY = fy
+
+            val old = scale
+            // Guard against detector glitches that would fling the viewport.
+            val factor = detector.scaleFactor.coerceIn(0.5f, 2f)
+            val next = (scale * factor).coerceIn(minScale, maxScale)
+            if (next == old) {
+                clampViewport()
+                invalidate()
+                scheduleRender()
+                return true
+            }
             tx = fx - (fx - tx) * (next / old)
             ty = fy - (fy - ty) * (next / old)
             scale = next
@@ -133,6 +153,12 @@ class MapView @JvmOverloads constructor(
             return true
         }
     })
+
+    init {
+        // We implement double-tap zoom ourselves; quick-scale fights with it.
+        scaleDetector.isQuickScaleEnabled = false
+        scaleDetector.isStylusScaleEnabled = false
+    }
 
     fun bind(runtime: MapRuntime) {
         mapRuntime = runtime
@@ -243,6 +269,7 @@ class MapView @JvmOverloads constructor(
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                activePointerId = event.getPointerId(0)
                 lastX = event.x
                 lastY = event.y
                 downX = event.x
@@ -250,28 +277,58 @@ class MapView @JvmOverloads constructor(
                 panning = false
                 gesturing = true
             }
-            MotionEvent.ACTION_POINTER_DOWN -> panning = false
-            MotionEvent.ACTION_MOVE -> {
-                if (!scaleDetector.isInProgress && event.pointerCount == 1 && !panning) {
-                    if (Math.abs(event.x - downX) > touchSlop || Math.abs(event.y - downY) > touchSlop) {
-                        panning = true
-                    }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                // Two fingers: scaling takes over, and any pending fling of a
+                // single finger is irrelevant.
+                panning = false
+                activePointerId = MotionEvent.INVALID_POINTER_ID
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                // Without this the next move compares against the finger that
+                // just left, which teleports the map across the screen.
+                val upIndex = event.actionIndex
+                val nextIndex = if (upIndex == 0) 1 else 0
+                if (nextIndex < event.pointerCount) {
+                    activePointerId = event.getPointerId(nextIndex)
+                    lastX = event.getX(nextIndex)
+                    lastY = event.getY(nextIndex)
+                    downX = lastX
+                    downY = lastY
+                } else {
+                    activePointerId = MotionEvent.INVALID_POINTER_ID
                 }
-                if (panning && !scaleDetector.isInProgress) {
-                    tx += event.x - lastX
-                    ty += event.y - lastY
+                panning = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (scaleDetector.isInProgress) {
+                    panning = false
+                    return true
+                }
+                if (activePointerId == MotionEvent.INVALID_POINTER_ID) return true
+                val index = event.findPointerIndex(activePointerId)
+                if (index < 0) return true
+                val x = event.getX(index)
+                val y = event.getY(index)
+                if (!panning) {
+                    val dx = x - downX
+                    val dy = y - downY
+                    if (dx * dx + dy * dy > touchSlop * touchSlop) panning = true
+                }
+                if (panning) {
+                    tx += x - lastX
+                    ty += y - lastY
                     clampViewport()
                     invalidate()
                     scheduleRender()
                 }
-                lastX = event.x
-                lastY = event.y
+                lastX = x
+                lastY = y
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                lastX = event.x
-                lastY = event.y
+                activePointerId = MotionEvent.INVALID_POINTER_ID
                 gesturing = false
-                scheduleRender()
+                // Always finish with a sharp, fully detailed frame.
+                scheduleRender(immediate = true)
             }
         }
         return true
@@ -290,16 +347,23 @@ class MapView @JvmOverloads constructor(
         ty = ty.coerceIn(marginY - worldH, h - marginY)
     }
 
-    private fun scheduleRender() {
+    private fun scheduleRender(immediate: Boolean = false) {
         if (width == 0 || height == 0) return
-        if (gesturing) return
+        if (immediate) forceFullQuality = true
         if (renderInFlight) {
             pendingRender = true
             return
         }
-        if (renderScheduled) return
+        if (renderScheduled) {
+            if (!immediate) return
+            handler.removeCallbacks(renderTask)
+            renderScheduled = false
+        }
         renderScheduled = true
-        handler.postDelayed(renderTask, 60)
+        // While a finger is down we still refresh, just at a relaxed rate and in
+        // a cheaper quality, so the area being dragged into view actually appears.
+        val delay = if (forceFullQuality) 0L else 55L
+        handler.postDelayed(renderTask, delay)
     }
 
     private val renderTask = Runnable {
@@ -317,6 +381,9 @@ class MapView @JvmOverloads constructor(
         val localTy = ty
         val cols = colors
         val sel = selection
+        // Cheap frames while the user is moving; a full-quality frame once idle.
+        val coarse = gesturing && !forceFullQuality
+        forceFullQuality = false
         val gen = ++generation
         renderInFlight = true
         renderer.execute {
@@ -330,11 +397,13 @@ class MapView @JvmOverloads constructor(
             }
             val canvas = Canvas(bitmap)
             val started = System.nanoTime()
-            drawWorld(canvas, w, h, s, localTx, localTy, cols, sel)
-            android.util.Log.d(
-                "WPRender",
-                "rendered ${w}x$h in ${(System.nanoTime() - started) / 1_000_000} ms",
-            )
+            drawWorld(canvas, w, h, s, localTx, localTy, cols, sel, coarse)
+            if (!coarse) {
+                android.util.Log.d(
+                    "WPRender",
+                    "rendered ${w}x$h in ${(System.nanoTime() - started) / 1_000_000} ms",
+                )
+            }
             handler.post {
                 renderInFlight = false
                 if (gen == generation) {
@@ -364,6 +433,7 @@ class MapView @JvmOverloads constructor(
         oy: Float,
         cols: IntArray,
         selected: Int,
+        coarse: Boolean = false,
     ) {
         canvas.drawColor(io.wpreborn.app.data.WorldRepository.OCEAN)
         val paths = Geo.paths
@@ -377,18 +447,21 @@ class MapView @JvmOverloads constructor(
         canvas.translate(ox, oy)
         canvas.scale(s, s)
 
-        val worldW = WorldContent.worldWidth
-        val worldH = WorldContent.worldHeight
-        gridPaint.strokeWidth = (0.6f / s).coerceAtLeast(0.03f)
-        for (i in 1 until 12) {
-            val gx = worldW * i / 12f
-            canvas.drawLine(gx, 0f, gx, worldH, gridPaint)
-        }
-        for (i in 1 until 6) {
-            val gy = worldH * i / 6f
-            canvas.drawLine(0f, gy, worldW, gy, gridPaint)
+        if (!coarse) {
+            val worldW = WorldContent.worldWidth
+            val worldH = WorldContent.worldHeight
+            gridPaint.strokeWidth = (0.6f / s).coerceAtLeast(0.03f)
+            for (i in 1 until 12) {
+                val gx = worldW * i / 12f
+                canvas.drawLine(gx, 0f, gx, worldH, gridPaint)
+            }
+            for (i in 1 until 6) {
+                val gy = worldH * i / 6f
+                canvas.drawLine(0f, gy, worldW, gy, gridPaint)
+            }
         }
 
+        fillPaint.isAntiAlias = !coarse
         fillPaint.style = Paint.Style.FILL
         for (i in io.wpreborn.app.data.Geo.drawOrder) {
             val b = bounds[i]
@@ -397,17 +470,20 @@ class MapView @JvmOverloads constructor(
             canvas.drawPath(paths[i], fillPaint)
         }
 
-        val border = ensureBorderPath()
-        if (border != null) {
-            borderPaint.strokeWidth = (0.7f / s).coerceAtLeast(0.05f)
-            canvas.drawPath(border, borderPaint)
-        }
+        if (!coarse) {
+            val border = ensureBorderPath()
+            if (border != null) {
+                borderPaint.strokeWidth = (0.7f / s).coerceAtLeast(0.05f)
+                canvas.drawPath(border, borderPaint)
+            }
 
-        if (selected in paths.indices) {
-            highlightPaint.strokeWidth = (2.4f / s).coerceAtLeast(0.2f)
-            canvas.drawPath(paths[selected], highlightPaint)
+            if (selected in paths.indices) {
+                highlightPaint.strokeWidth = (2.4f / s).coerceAtLeast(0.2f)
+                canvas.drawPath(paths[selected], highlightPaint)
+            }
         }
         canvas.restore()
+        fillPaint.isAntiAlias = true
     }
 
     private fun ensureBorderPath(): Path? {

@@ -85,8 +85,7 @@ class WorldViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun loadThumbnail(mapId: Long, width: Int, height: Int): Bitmap? =
         withContext(Dispatchers.IO) {
-            val rt = repo.loadRuntime(mapId) ?: return@withContext null
-            repo.thumbnail(rt, width, height)
+            repo.thumbnail(mapId, width, height)
         }
 
     fun openMap(mapId: Long) {
@@ -136,6 +135,12 @@ class WorldViewModel(app: Application) : AndroidViewModel(app) {
         }
         val province = WorldContent.provinces.getOrNull(index) ?: return
         if (!province.isLand) {
+            selectedProvince = index
+            return
+        }
+        // Tapping a province that already belongs to this country is a no-op,
+        // not a history entry.
+        if (rt.owners.getOrElse(index) { 0L } == mc) {
             selectedProvince = index
             return
         }
@@ -300,7 +305,13 @@ class WorldViewModel(app: Application) : AndroidViewModel(app) {
             busy = true
             busyLabel = "Importing database…"
             closeMap()
-            val result = withContext(Dispatchers.IO) { repo.importFrom(uri) }
+            val main = android.os.Handler(android.os.Looper.getMainLooper())
+            val result = withContext(Dispatchers.IO) {
+                repo.importFrom(uri) { bytes ->
+                    val mb = bytes / (1L shl 20)
+                    main.post { busyLabel = "Importing database… $mb MB" }
+                }
+            }
             busy = false
             message = when (result) {
                 is DbResult.Ok -> "Database imported"
