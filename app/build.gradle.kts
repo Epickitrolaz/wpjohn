@@ -4,6 +4,18 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+/** CI passes these in; local builds keep the values below. Blank values fall back. */
+fun setting(name: String, fallback: String): String {
+    val prop = project.findProperty(name) as String?
+    if (!prop.isNullOrBlank()) return prop
+    val env = System.getenv(name)
+    if (!env.isNullOrBlank()) return env
+    return fallback
+}
+
+val wpVersionCode = setting("WP_VERSION_CODE", "1").toIntOrNull() ?: 1
+val wpVersionName = setting("WP_VERSION_NAME", "2.0")
+
 android {
     namespace = "io.wpreborn.app"
     compileSdk = 35
@@ -12,17 +24,20 @@ android {
         applicationId = "io.wpreborn.app"
         minSdk = 23
         targetSdk = 35
-        versionCode = 1
-        versionName = "2.0"
+        versionCode = wpVersionCode
+        versionName = wpVersionName
         resourceConfigurations += listOf("en")
     }
 
     signingConfigs {
         create("release") {
-            storeFile = rootProject.file("keystore/release.jks")
-            storePassword = (project.findProperty("WP_STORE_PASSWORD") as String?) ?: "wpreborn"
-            keyAlias = (project.findProperty("WP_KEY_ALIAS") as String?) ?: "wpreborn"
-            keyPassword = (project.findProperty("WP_KEY_PASSWORD") as String?) ?: "wpreborn"
+            // CI restores the secret into keystore/wp-ci.jks; the committed key
+            // is the fallback so local and automated builds share an identity.
+            val ciKeystore = rootProject.file("keystore/wp-ci.jks")
+            storeFile = if (ciKeystore.exists()) ciKeystore else rootProject.file("keystore/release.jks")
+            storePassword = setting("WP_STORE_PASSWORD", "wpreborn")
+            keyAlias = setting("WP_KEY_ALIAS", "wpreborn")
+            keyPassword = setting("WP_KEY_PASSWORD", "wpreborn")
         }
     }
 

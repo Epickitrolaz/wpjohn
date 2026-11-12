@@ -6,3 +6,4 @@ local.properties
 app/build/
 .kotlin/
 dist/
+keystore/wp-ci.jks

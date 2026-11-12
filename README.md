@@ -58,14 +58,42 @@ Requirements: JDK 17, Android SDK with platform 35 and build-tools 35.0.0.
 ```bash
 export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 export ANDROID_HOME=/path/to/android-sdk
-gradle :app:assembleRelease
+./gradlew :app:assembleRelease
 ```
 
 The APK is written to `app/build/outputs/apk/release/app-release.apk` (~3.7 MB).
 
+`versionCode` and `versionName` default to `1` / `2.0` for local builds and can be
+overridden with `-PWP_VERSION_CODE=… -PWP_VERSION_NAME=…`.
+
 The release build is signed with the key in `keystore/release.jks`
 (alias/password: `wpreborn`). Keep that file if you want future builds to
 install as updates over the current app.
+
+### Continuous delivery
+
+Every push to `main` runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which builds the signed APK on JDK 17 and publishes it as a GitHub release tagged
+`v2.0.<run-number>`. The run number becomes the `versionCode`, so releases
+always install over each other. Each run also uploads the APK as a workflow
+artifact.
+
+CI refuses to publish if the APK requests `INTERNET`, keeping the offline
+guarantee enforceable.
+
+Optional repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Purpose |
+|---|---|
+| `KEYSTORE_BASE64` | `base64 -w0 keystore/release.jks`; used in preference to the committed key |
+| `KEYSTORE_PASSWORD` | keystore password (default `wpreborn`) |
+| `KEY_ALIAS` | key alias (default `wpreborn`) |
+| `KEY_PASSWORD` | key password (default `wpreborn`) |
+
+Without them the committed key is used, and the resulting APK is signed with the
+same identity as local builds.
+
+Contributor notes live in [AGENTS.md](AGENTS.md).
 
 ### Regenerating the bundled data
 
