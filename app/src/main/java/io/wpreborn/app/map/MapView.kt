@@ -55,6 +55,9 @@ class MapView @JvmOverloads constructor(
     private var scale = 1f
     private var minScale = 1f
     private var maxScale = 20f
+
+    /** How far past the fitted world the user may zoom in. */
+    private val maxZoomFactor = 42f
     private var tx = 0f
     private var ty = 0f
     private var initialised = false
@@ -191,7 +194,7 @@ class MapView @JvmOverloads constructor(
         val worldW = WorldContent.worldWidth.coerceAtLeast(1f)
         val worldH = WorldContent.worldHeight.coerceAtLeast(1f)
         minScale = minOf(width / worldW, height / worldH) * 0.97f
-        maxScale = minScale * 18f
+        maxScale = minScale * maxZoomFactor
         scale = minScale
         tx = (width - worldW * scale) / 2f
         ty = (height - worldH * scale) / 2f
@@ -232,6 +235,27 @@ class MapView @JvmOverloads constructor(
         clampViewport()
         invalidate()
         scheduleRender()
+    }
+
+    /**
+     * Brings a province found through search into view at a readable zoom level
+     * and highlights it. Tiny islands would otherwise jump straight to the zoom
+     * ceiling, so the fit is capped and never below a comfortable overview.
+     */
+    fun focusProvince(index: Int) {
+        val b = Geo.bounds.getOrNull(index) ?: return
+        if (width == 0 || height == 0) return
+        val spanW = b.width().coerceAtLeast(WorldContent.worldWidth / 320f)
+        val spanH = b.height().coerceAtLeast(WorldContent.worldHeight / 320f)
+        val fit = minOf(width / spanW, height / spanH) * 0.42f
+        val ceiling = minOf(maxScale, minScale * 14f)
+        scale = fit.coerceIn(minScale * 1.6f, ceiling.coerceAtLeast(minScale * 1.6f))
+        tx = width / 2f - b.centerX() * scale
+        ty = height / 2f - b.centerY() * scale
+        selection = index
+        clampViewport()
+        invalidate()
+        scheduleRender(immediate = true)
     }
 
     fun zoomLabel(): String = String.format(java.util.Locale.US, "%.1f×", scale / minScale.coerceAtLeast(0.0001f))
