@@ -57,7 +57,7 @@ class MapView @JvmOverloads constructor(
     private var maxScale = 20f
 
     /** How far past the fitted world the user may zoom in. */
-    private val maxZoomFactor = 42f
+    private val maxZoomFactor = 126f
     private var tx = 0f
     private var ty = 0f
     private var initialised = false
