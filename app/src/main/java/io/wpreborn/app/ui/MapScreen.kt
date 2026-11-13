@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -47,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,8 +56,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -65,7 +71,9 @@ import io.wpreborn.app.WorldViewModel
 import io.wpreborn.app.data.Colors
 import io.wpreborn.app.data.CountryState
 import io.wpreborn.app.data.MapRuntime
+import io.wpreborn.app.data.WorldContent
 import io.wpreborn.app.map.MapView
+import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -83,6 +91,7 @@ fun MapScreen(vm: WorldViewModel) {
     var showNewCountry by remember { mutableStateOf(false) }
     var pendingImport by remember { mutableStateOf<Uri?>(null) }
     var renameProvince by remember { mutableStateOf<Int?>(null) }
+    var showSearch by remember { mutableStateOf(false) }
 
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream")
@@ -138,6 +147,11 @@ fun MapScreen(vm: WorldViewModel) {
                     )
                 }
                 IconButton(
+                    onClick = { showSearch = true },
+                ) {
+                    Icon(Icons.Default.Search, contentDescription = "Find a province", tint = Mist)
+                }
+                IconButton(
                     onClick = { vm.undoPaint() },
                     enabled = vm.canUndo,
                 ) {
@@ -154,6 +168,9 @@ fun MapScreen(vm: WorldViewModel) {
                     DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
                         DropdownMenuItem(text = { Text("Countries") }, onClick = {
                             showMenu = false; showCountries = true
+                        })
+                        DropdownMenuItem(text = { Text("Find a province") }, onClick = {
+                            showMenu = false; showSearch = true
                         })
                         DropdownMenuItem(text = { Text("Rename world") }, onClick = {
                             showMenu = false; showRename = true
@@ -293,6 +310,24 @@ fun MapScreen(vm: WorldViewModel) {
         }
     }
 
+    if (showSearch) {
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showSearch = false },
+            sheetState = sheetState,
+            containerColor = SurfaceNight,
+        ) {
+            ProvinceSearchSheet(
+                runtime = runtime,
+                onPick = { index ->
+                    vm.selectProvince(index)
+                    mapView?.focusProvince(index)
+                    showSearch = false
+                },
+            )
+        }
+    }
+
     editCountry?.let { country ->
         EditCountryDialog(
             country = country,
@@ -350,6 +385,129 @@ private fun ContinentBar(onPick: (android.graphics.RectF?) -> Unit) {
                     style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
                 )
+            }
+        }
+    }
+}
+
+private data class ProvinceHit(
+    val index: Int,
+    val name: String,
+    val country: CountryState?,
+)
+
+/** Searchable index of every land province in the open world. */
+@Composable
+private fun ProvinceSearchSheet(runtime: MapRuntime, onPick: (Int) -> Unit) {
+    var query by remember { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    val hits = remember(runtime) {
+        val provinces = WorldContent.provinces
+        val out = ArrayList<ProvinceHit>(provinces.size)
+        for (i in provinces.indices) {
+            if (!provinces[i].isLand) continue
+            out += ProvinceHit(i, runtime.nameOfProvince(i), runtime.countryOfProvince(i))
+        }
+        // Browsing with an empty query should read like an atlas index.
+        out.sortWith { a, b -> a.name.compareTo(b.name, ignoreCase = true) }
+        out
+    }
+    val needle = query.trim().lowercase(Locale.ROOT)
+    val results = remember(needle, hits) {
+        if (needle.isEmpty()) hits
+        else hits.filter { it.name.lowercase(Locale.ROOT).contains(needle) }
+    }
+    val keyboard = LocalSoftwareKeyboardController.current
+    LaunchedEffect(Unit) {
+        // The sheet still animates in; focusing earlier loses the keyboard.
+        delay(240)
+        focusRequester.requestFocus()
+        delay(60)
+        keyboard?.show()
+    }
+    Column(Modifier.fillMaxWidth().height(548.dp)) {
+        Column(Modifier.padding(horizontal = 20.dp, vertical = 2.dp)) {
+            Text("Find a province", style = MaterialTheme.typography.headlineSmall, color = Mist)
+            Text(
+                if (needle.isEmpty()) "${hits.size} land provinces"
+                else "${results.size} matching ${if (results.size == 1) "province" else "provinces"}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = Muted,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            singleLine = true,
+            placeholder = { Text("Type a name", color = Muted) },
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Muted) },
+            trailingIcon = {
+                if (query.isNotEmpty()) {
+                    IconButton(onClick = { query = "" }) {
+                        Icon(Icons.Default.Close, contentDescription = "Clear", tint = Muted)
+                    }
+                }
+            },
+            shape = RoundedCornerShape(14.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .focusRequester(focusRequester),
+        )
+        Spacer(Modifier.height(8.dp))
+        if (results.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    "No province matches \u201C${query.trim()}\u201D",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Muted,
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(bottom = 32.dp),
+            ) {
+                items(results, key = { it.index }) { hit ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                focusManager.clearFocus()
+                                onPick(hit.index)
+                            }
+                            .padding(horizontal = 20.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ColorDot(hit.country?.color ?: 0xFF39404D.toInt(), size = 12.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                hit.name,
+                                color = Mist,
+                                style = MaterialTheme.typography.titleMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Text(
+                                hit.country?.name ?: "Unclaimed",
+                                color = hit.country?.let { Color(Colors.lighten(it.color, 0.45f)) }
+                                    ?: Muted,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
             }
         }
     }
